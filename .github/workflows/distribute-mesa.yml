@@ -31,8 +31,8 @@ env:
   UPSTREAM_REPOSITORY: lfdevs/mesa-for-android-container
   UPSTREAM_URL: https://github.com/lfdevs/mesa-for-android-container
   UPSTREAM_RELEASES_URL: https://github.com/lfdevs/mesa-for-android-container/releases
-  MEDIA_REPOSITORY: Re-s/droidspaces-media-decode
-  MEDIA_URL: https://github.com/Re-s/droidspaces-media-decode
+  MEDIA_REPOSITORY: Yizhou147/droidspaces-media-decode
+  MEDIA_URL: https://github.com/Yizhou147/droidspaces-media-decode
   DISTRIBUTION_TAG: mesa-for-android-container
   MANIFEST_NAME: mesa-distribution-manifest
 
