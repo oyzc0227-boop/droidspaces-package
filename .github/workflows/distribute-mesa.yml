@@ -1,6 +1,6 @@
 # Mesa 源仓库：https://github.com/lfdevs/mesa-for-android-container
 # 上游 Releases：https://github.com/lfdevs/mesa-for-android-container/releases
-# 媒体解码源仓库：https://github.com/Re-s/droidspaces-media-decode
+# 媒体解码源仓库：https://github.com/Yizhou147/droidspaces-media-decode
 # 本工作流不修改上游 Mesa 资产内容。
 
 name: 分发 Mesa for Android Container
@@ -90,18 +90,33 @@ jobs:
           mesa_tag="$(jq -er '.tag_name' "$mesa_metadata")"
 
           gh api "repos/$MEDIA_REPOSITORY/releases/latest" > "$media_metadata"
-          jq -e --arg driver msm_drm_drv_video.so --arg sums SHA256SUMS '
+          jq -e '
             .draft == false and
             .prerelease == false and
-            ([.assets[] | select(.name == $driver)] | length == 1) and
-            ([.assets[] | select(.name == $sums)] | length == 1)
+            (.tag_name | type == "string" and length > 0)
           ' "$media_metadata" >/dev/null
+          media_asset_names="$(jq -er '
+            [
+              [.assets[]? | select((.name // "") | test("^msm_drm_drv_video(-[-A-Za-z0-9._+~]+)?\\.so$"))],
+              [.assets[]? | select((.name // "") | test("^SHA256SUMS(\\.rel)?$"))]
+            ]
+            | if (.[0] | length) == 1 and (.[1] | length) == 1 then
+                [.[0][0].name, .[1][0].name] | @tsv
+              else
+                error("媒体解码 Release 缺少唯一的驱动或 SHA256SUMS 资产")
+              end
+          ' "$media_metadata")"
+          IFS=$'\t' read -r media_driver_asset media_checksums_asset <<< "$media_asset_names"
           media_tag="$(jq -er '.tag_name' "$media_metadata")"
 
           echo "mesa_tag=$mesa_tag" >> "$GITHUB_OUTPUT"
           echo "media_tag=$media_tag" >> "$GITHUB_OUTPUT"
+          echo "media_driver_asset=$media_driver_asset" >> "$GITHUB_OUTPUT"
+          echo "media_checksums_asset=$media_checksums_asset" >> "$GITHUB_OUTPUT"
           echo "选择 Mesa 上游 Release：$UPSTREAM_RELEASES_URL/tag/$mesa_tag"
           echo "选择媒体驱动 Release：$MEDIA_URL/releases/tag/$media_tag"
+          echo "选择媒体驱动资产：$media_driver_asset"
+          echo "选择媒体校验资产：$media_checksums_asset"
 
       - name: 下载并校验分发资产
         id: assets
@@ -109,6 +124,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MESA_TAG: ${{ steps.upstream.outputs.mesa_tag }}
           MEDIA_TAG: ${{ steps.upstream.outputs.media_tag }}
+          MEDIA_DRIVER_ASSET: ${{ steps.upstream.outputs.media_driver_asset }}
+          MEDIA_CHECKSUMS_ASSET: ${{ steps.upstream.outputs.media_checksums_asset }}
         shell: bash
         run: |
           set -euo pipefail
@@ -139,8 +156,8 @@ jobs:
           gh release download "$MEDIA_TAG" \
             --repo "$MEDIA_REPOSITORY" \
             --dir "$asset_dir" \
-            --pattern msm_drm_drv_video.so \
-            --pattern SHA256SUMS
+            --pattern "$MEDIA_DRIVER_ASSET" \
+            --pattern "$MEDIA_CHECKSUMS_ASSET"
           gh api \
             --header 'Accept: application/vnd.github.raw+json' \
             "repos/$MEDIA_REPOSITORY/contents/LICENSE?ref=$MEDIA_TAG" \
@@ -154,8 +171,10 @@ jobs:
             echo "应当下载 7 个 Mesa 资产，实际为 ${#mesa_assets[@]} 个。" >&2
             exit 1
           }
-          [[ -f "$asset_dir/msm_drm_drv_video.so" && \
-              -f "$asset_dir/SHA256SUMS" && \
+          media_driver_asset_file="$asset_dir/$MEDIA_DRIVER_ASSET"
+          media_checksums_asset_file="$asset_dir/$MEDIA_CHECKSUMS_ASSET"
+          [[ -f "$media_driver_asset_file" && \
+              -f "$media_checksums_asset_file" && \
               -s "$asset_dir/droidspaces-media-decode-LICENSE" ]]
 
           verify_upstream_asset() {
@@ -181,8 +200,32 @@ jobs:
           for asset in "${mesa_assets[@]}"; do
             verify_upstream_asset "$mesa_metadata" "$asset"
           done
-          verify_upstream_asset "$media_metadata" "$asset_dir/msm_drm_drv_video.so"
-          verify_upstream_asset "$media_metadata" "$asset_dir/SHA256SUMS"
+          verify_upstream_asset "$media_metadata" "$media_driver_asset_file"
+          verify_upstream_asset "$media_metadata" "$media_checksums_asset_file"
+
+          # 保持分发 Release 的稳定文件名，兼容安装器和已有客户端；上游
+          # 现在会在驱动和校验文件名中携带版本信息。
+          if [[ "$MEDIA_DRIVER_ASSET" != msm_drm_drv_video.so ]]; then
+            mv -- "$media_driver_asset_file" "$asset_dir/msm_drm_drv_video.so"
+          fi
+          normalized_checksums="$asset_dir/.SHA256SUMS.normalized"
+          awk -v source="$MEDIA_DRIVER_ASSET" -v target=msm_drm_drv_video.so '
+            $2 == source { $2 = target; matches += 1 }
+            { print }
+            END { exit matches == 1 ? 0 : 1 }
+          ' "$media_checksums_asset_file" > "$normalized_checksums" || {
+            echo "媒体校验文件中没有唯一的 $MEDIA_DRIVER_ASSET 条目。" >&2
+            exit 1
+          }
+          mv -- "$normalized_checksums" "$asset_dir/SHA256SUMS"
+          if [[ "$MEDIA_CHECKSUMS_ASSET" != SHA256SUMS ]]; then
+            rm -- "$media_checksums_asset_file"
+          fi
+
+          [[ -f "$asset_dir/msm_drm_drv_video.so" && \
+              -f "$asset_dir/SHA256SUMS" && \
+              "$(awk '$2 == "msm_drm_drv_video.so" { count += 1 } END { print count + 0 }' \
+                "$asset_dir/SHA256SUMS")" == 1 ]]
 
           install -m 0755 scripts/tui/install-mesa.sh "$asset_dir/install-mesa.sh"
           manifest="$asset_dir/$MANIFEST_NAME"
